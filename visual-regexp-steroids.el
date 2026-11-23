@@ -1,4 +1,4 @@
-;;; visual-regexp-steroids.el --- Extends visual-regexp to support other regexp engines
+;;; visual-regexp-steroids.el --- Extends visual-regexp to support other regexp engines  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2013-2017 Marko Bencun
 
