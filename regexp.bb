@@ -12,7 +12,17 @@
   (println (escape msg)))
 
 (def bool-flags #{"--eval" "--feedback" "--backwards"})
-(def value-flags #{"--regexp" "--replace" "--feedback-limit"})
+(def value-flags #{"--regexp" "--replace" "--feedback-limit" "--flags"})
+
+(def pattern-flags
+  "u is a no-op: like Python 3, classes such as \\w are always Unicode-aware."
+  {\i Pattern/CASE_INSENSITIVE
+   \m Pattern/MULTILINE
+   \s Pattern/DOTALL
+   \u 0})
+
+(defn compile-regexp [{:keys [regexp flags]}]
+  (Pattern/compile regexp (reduce bit-or Pattern/UNICODE_CHARACTER_CLASS (map pattern-flags flags))))
 
 (defn parse-args
   "Unknown tokens are skipped: the elisp passes a literal \"nil\" when there is no limit."
@@ -74,15 +84,15 @@
       (eval '(require '[clojure.string :as str]))
       (eval (list 'fn '[m i] form)))))
 
-(defn run-matches [{:keys [regexp backwards feedback-limit]} region]
-  (let [ms (cond-> (vec (match-seq (Pattern/compile regexp) region))
+(defn run-matches [{:keys [backwards feedback-limit] :as opts} region]
+  (let [ms (cond-> (vec (match-seq (compile-regexp opts) region))
              backwards rseq)]
     (doseq [mr (cond->> ms feedback-limit (take (parse-long feedback-limit)))]
       (println (clojure.string/join " " (map #(clojure.string/join " " %) (:spans mr)))))
     (message (if (seq ms) (format "%d matches" (count ms)) "no match"))))
 
-(defn run-replace [{:keys [regexp replace eval feedback feedback-limit]} region]
-  (let [ms (vec (match-seq (Pattern/compile regexp) region))
+(defn run-replace [{:keys [replace eval feedback feedback-limit] :as opts} region]
+  (let [ms (vec (match-seq (compile-regexp opts) region))
         render (if eval (eval-replacer replace) (fn [mr _] (expand mr replace)))
         shown (cond->> ms (and feedback feedback-limit) (take (parse-long feedback-limit)))]
     (doseq [[i mr] (map-indexed vector shown)]

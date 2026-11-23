@@ -161,21 +161,21 @@ See also: http://docs.python.org/library/re.html#re.I"
     (vr--update-minibuffer-prompt)
     (vr--show-feedback)))
 
-(defun vr--get-regexp-modifiers-prefix ()
-  "Construct (?imsu) prefix based on selected modifiers."
+(defun vr--regexp-flags ()
+  "Selected modifiers as flag letters, e.g. \"ms\"."
   (if (vr--regexp-modifiers-enabled)
-      (let ((s (mapconcat 'identity
-                          (delq nil (mapcar (lambda (m)
-                                              (when (plist-get vr--regexp-modifiers m)
-                                                (cond ((equal m :I) "i")
-                                                      ((equal m :M) "m")
-                                                      ((equal m :S) "s")
-                                                      ((equal m :U) "u")
-                                                      (t nil))))
-                                            (list :I :M :S :U)))
-                          "")))
-        (if (string= "" s) "" (format "(?%s)" s)))
+      (mapconcat (lambda (m) (if (plist-get vr--regexp-modifiers m) (downcase (substring (symbol-name m) 1)) ""))
+                 '(:I :M :S :U) "")
     ""))
+
+(defun vr--get-regexp-modifiers-prefix ()
+  "Selected modifiers as a (?imsu) prefix, for display in the prompt."
+  (let ((flags (vr--regexp-flags)))
+    (if (string= "" flags) "" (format "(?%s)" flags))))
+
+(defun vr--flags-argument ()
+  (let ((flags (vr--regexp-flags)))
+    (if (string= "" flags) "" (format "--flags %s" flags))))
 
 (defadvice vr--get-replacement (around get-unmodified-replacement (replacement match-data i) activate)
   (if (vr--elisp-engine-p)
@@ -193,8 +193,7 @@ See also: http://docs.python.org/library/re.html#re.I"
         (error (signal (car err) (list (format "%s error" vr/engine))))))
 
     (setq ad-return-value
-          (concat (vr--get-regexp-modifiers-prefix)
-                  regexp))))
+          (if for-display (concat (vr--get-regexp-modifiers-prefix) regexp) regexp))))
 
 ;;; shell command / parsing functions
 
@@ -323,8 +322,9 @@ and the message line."
       (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
     (setq ad-return-value
                (vr--run-command
-                (format "%s matches --regexp %s %s %s"
+                (format "%s matches %s --regexp %s %s %s"
                         (vr--get-command)
+                        (vr--flags-argument)
                         (shell-quote-argument regexp-string)
                         (when feedback-limit (format "--feedback-limit %s" feedback-limit))
                         (if forward "" "--backwards"))
@@ -339,8 +339,9 @@ and the message line."
       (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
     (setq ad-return-value
                (vr--run-command
-                (format "%s replace %s %s %s --regexp %s --replace %s"
+                (format "%s replace %s %s %s %s --regexp %s --replace %s"
                         (vr--get-command)
+                        (vr--flags-argument)
                         (if feedback "--feedback" "")
                         (if feedback-limit
                             (format "--feedback-limit %s" feedback-limit)
@@ -456,7 +457,9 @@ and the message line."
         (let ((matches-list (list))
               (number-of-matches 0))
           (setq message-line
-                (vr--feedback-function
+                ;; isearch has no modifier toggles; ignore any left over from vr/replace.
+                (let ((vr--regexp-modifiers nil))
+                 (vr--feedback-function
                  regexp
                  forward
                  (if count
@@ -465,7 +468,7 @@ and the message line."
                    (if bound nil 1))
                  (lambda (i j begin end)
                    (when (= j 0) (setq number-of-matches (1+ number-of-matches)))
-                   (setq matches-list (cons (list i j begin end) matches-list)))))
+                   (setq matches-list (cons (list i j begin end) matches-list))))))
 
           ;; convert list to vector
           (setq matches-vec (make-vector number-of-matches nil))

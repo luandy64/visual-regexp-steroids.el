@@ -29,7 +29,7 @@ argv = sys.argv
 
 # not using argparse because it is not in the stdlib of python2.7/3.1.
 BOOL_ARGS = ('--eval', '--feedback', '--backwards')
-STR_ARGS = ('--regexp', '--replace', )
+STR_ARGS = ('--regexp', '--replace', '--flags', )
 INT_ARGS = ('--feedback-limit', )
 def parse_arg(arg, required=True):
     if not required and arg not in sys.argv:
@@ -46,6 +46,13 @@ def parse_arg(arg, required=True):
     if arg in INT_ARGS:
         return int(lookahead())
     raise Exception("Unrecognized argument: %s" % arg)
+
+FLAGS = {'i': re.I, 'm': re.M, 's': re.S, 'u': re.U}
+def compile_regexp(regexp):
+    flags = 0
+    for letter in parse_arg('--flags', required=False) or '':
+        flags |= FLAGS[letter]
+    return re.compile(regexp, flags)
 
 def escape(s):
     return base64.b64encode(s.encode('utf8')).decode('utf8')
@@ -65,7 +72,7 @@ if argv[1] == 'matches':
 
     feedback_limit = parse_arg('--feedback-limit', required=False)
     try:
-        matches = list(re.finditer(regexp, region))
+        matches = list(compile_regexp(regexp).finditer(region))
         if parse_arg('--backwards'):
             matches.reverse()
         for i, match in enumerate(matches):
@@ -126,9 +133,10 @@ elif argv[1] == "replace":
         # call eval_replace on each match.
         # we cannot loop through and replace matches one by one (regexp replacing match.group(0))  because zero-width patterns (i.e. "(A(?=B))")
         # are not part of match.group(0) and the regexp would not match again.
-        re.sub(regexp, eval_replace, region, count=feedback_limit if feedback and feedback_limit else 0)
+        pattern = compile_regexp(regexp)
+        pattern.sub(eval_replace, region, count=feedback_limit if feedback and feedback_limit else 0)
         # this line is only for counting matches
-        matches = len(list(re.finditer(regexp, region)))
+        matches = len(list(pattern.finditer(region)))
         if feedback:
             if matches:
                 message("%d matches" % matches)
