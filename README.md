@@ -3,7 +3,7 @@
 visual-regexp-steroids is an extension to [visual-regexp](https://github.com/benma/visual-regexp.el) which enables the use of modern regexp engines (no more escaped group parentheses, and other goodies!).
 In addition to that, you can optionally use the better regexp syntax to power `isearch-forward-regexp` and `isearch-backward-regexp`.
 
-For now, Python and [pcre2el](https://github.com/joddie/pcre2el) is supported out of the box (tested on Linux and Windows). If you want to add custom scripts to enable your favorite language, please get in touch.
+Python, [Babashka](https://babashka.org) (Java regexps, Clojure expressions) and [pcre2el](https://github.com/joddie/pcre2el) are supported out of the box. Other engines can be registered with `vr/define-engine` (see below).
 
 ## Installation
 
@@ -33,6 +33,24 @@ You can choose the engine (e.g. to fall back to the Emacs regexp engine) with `v
 (define-key esc-map (kbd "C-s") 'vr/isearch-forward) ;; C-M-s
 ```
 To customize, use `M-x customize-group [RET] visual-regexp`. You can specify which engine to use by modifying `vr/engine` (defaults to Python), and how the Python interpreter is invoked by modifying the `vr/command-python` variable. The default is `python /path/to/visual-regexp-steroids/regexp.py`.
+The Babashka engine is invoked via `vr/command-babashka` (default `bb /path/to/visual-regexp-steroids/regexp.bb`).
+
+### Adding an engine
+
+An external engine is any command that speaks the same stdin/stdout protocol as `regexp.py`:
+
+```Lisp
+(vr/define-engine 'ruby
+  :tag "Ruby"
+  :command "ruby /path/to/regexp.rb" ; a string, or a variable holding one
+  :modifiers t                       ; accepts a (?imsu) prefix: enables C-c i/m/s/u
+  :eval t)                           ; replacements can be expressions: enables C-c C-c
+```
+
+It then appears in `vr/select-replace` and in the `vr/engine` customization choices.
+Elisp-backed engines use `:kind 'elisp`, optionally with `:translate` (e.g. `pcre-to-elisp`) or `:plain t`.
+
+When using Babashka, named groups are `(?<name>...)`, template replacements accept `\1`, `\g<name>` and `\\`, and expressions (`C-c C-c`) are Clojure with `m` (the match: `:groups`, `:spans`, `:named`), `i` (the match counter) and `str/` (`clojure.string`) in scope, e.g. `(str/upper-case \1)`.
 
 ## Examples
 

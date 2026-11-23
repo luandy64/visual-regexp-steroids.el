@@ -41,6 +41,8 @@
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'seq)
 (require 'visual-regexp)
 
 ;;; variables
@@ -53,6 +55,12 @@
   :type 'string
   :group 'visual-regexp)
 
+(defcustom vr/command-babashka
+  (format "bb %s" (expand-file-name "regexp.bb" (file-name-directory load-file-name)))
+  "External command used for the Babashka engine."
+  :type 'string
+  :group 'visual-regexp)
+
 (defcustom vr/command-custom ""
   "Custom external command used when the engine is set to custom."
   :type 'string
@@ -62,14 +70,45 @@
   "Which engine to use for searching/replacing.
 Use Emacs to use Emacs-style regular expressions.
 Use Python to use Python's regular expressions (see vr/command-python).
+Use Babashka to use Java regular expressions and Clojure expressions
+\(see vr/command-babashka).
 Use pcre2el (https://github.com/joddie/pcre2el) to use PCRE regular expressions.
-Use Custom to use a custom external command (see vr/command-custom)."
-  :type '(choice
-          (const :tag "Emacs" emacs)
-          (const :tag "pcre2el" pcre2el)
-          (const :tag "Python" python)
-          (const :tag "Custom" custom))
+Use Custom to use a custom external command (see vr/command-custom).
+More engines can be added with `vr/define-engine'."
+  :type '(choice (const :tag "Python" python))
   :group 'visual-regexp)
+
+(defvar vr/engines nil
+  "Registered engines, an alist of (NAME . PLIST). See `vr/define-engine'.")
+
+(cl-defun vr/define-engine (name &key tag (kind 'external) command modifiers eval translate plain native-isearch)
+  "Register regexp engine NAME, or redefine it in place.
+KIND is `external' (run COMMAND, a string or a variable holding one)
+or `elisp' (Emacs regexps, converted by TRANSLATE if set, literal if PLAIN).
+MODIFIERS: the engine accepts a (?imsu) prefix.
+EVAL: replacements can be expressions (toggled with C-c C-c).
+NATIVE-ISEARCH: `vr/isearch-forward' uses the built-in regexp isearch."
+  (let ((props (list :kind kind :command command :modifiers modifiers :eval eval
+                     :translate translate :plain plain :native-isearch native-isearch))
+        (entry (assq name vr/engines)))
+    (if entry
+        (setcdr entry props)
+      (setq vr/engines (append vr/engines (list (cons name props))))))
+  (custom-add-choice 'vr/engine `(const :tag ,(or tag (symbol-name name)) ,name))
+  name)
+
+(defun vr--engine-prop (prop)
+  (plist-get (alist-get vr/engine vr/engines) prop))
+
+(defun vr--elisp-engine-p ()
+  (eq (vr--engine-prop :kind) 'elisp))
+
+(vr/define-engine 'custom :tag "Custom" :command 'vr/command-custom :eval t)
+(vr/define-engine 'emacs :tag "Emacs" :kind 'elisp :native-isearch t)
+(vr/define-engine 'emacs-plain :tag "Emacs (plain)" :kind 'elisp :plain t)
+(vr/define-engine 'pcre2el :tag "pcre2el" :kind 'elisp :translate 'pcre-to-elisp)
+(vr/define-engine 'python :tag "Python" :command 'vr/command-python :modifiers t :eval t)
+(vr/define-engine 'babashka :tag "Babashka" :command 'vr/command-babashka :modifiers t :eval t)
 
 (defcustom vr/default-regexp-modifiers '(:I nil :M t :S nil :U nil)
   "Modifiers that are applied by default. All modifiers are: '(I M S U).
@@ -86,8 +125,6 @@ See also: http://docs.python.org/library/re.html#re.I"
 
 ;;; private variables
 
-(defconst vr--engines '(emacs emacs-plain pcre2el python))
-
 (defvar vr--use-expression nil
   "Use expression instead of string in replacement.")
 
@@ -101,7 +138,7 @@ See also: http://docs.python.org/library/re.html#re.I"
 (define-key vr/minibuffer-keymap (kbd "C-c u") (lambda () (interactive) (vr--toggle-regexp-modifier :U)))
 
 (define-key vr/minibuffer-keymap (kbd "C-c C-c") (lambda () (interactive)
-                                                   (when (vr--in-replace)
+                                                   (when (and (vr--in-replace) (vr--engine-prop :eval))
                                                      (setq vr--use-expression (not vr--use-expression))
                                                      (vr--update-minibuffer-prompt)
                                                      (vr--do-replace-feedback))))
@@ -114,7 +151,7 @@ See also: http://docs.python.org/library/re.html#re.I"
                                 (setq vr--regexp-modifiers (copy-sequence vr/default-regexp-modifiers))))
 
 (defun vr--regexp-modifiers-enabled ()
-  (eq vr/engine 'python))
+  (vr--engine-prop :modifiers))
 
 (defun vr--toggle-regexp-modifier (modifier)
   "modifier should be one of :I, :M, :S, :U."
@@ -141,21 +178,19 @@ See also: http://docs.python.org/library/re.html#re.I"
     ""))
 
 (defadvice vr--get-replacement (around get-unmodified-replacement (replacement match-data i) activate)
-  (cond ((member vr/engine '(emacs pcre2el))
-         ad-do-it)
-        ((eq vr/engine 'emacs-plain)
-         (let ((vr/plain t)) ad-do-it))
-        (t
-         (setq ad-return-value replacement))))
+  (if (vr--elisp-engine-p)
+      (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
+    (setq ad-return-value replacement)))
 
 (defadvice vr--get-regexp-string (around get-regexp-string (&optional for-display) activate)
   ad-do-it
-  (let ((regexp ad-return-value))
-    (when (and (not for-display) (eq vr/engine 'pcre2el))
+  (let ((regexp ad-return-value)
+        (translate (vr--engine-prop :translate)))
+    (when (and (not for-display) translate)
       (condition-case err
-          (setq regexp (pcre-to-elisp regexp))
+          (setq regexp (funcall translate regexp))
         (invalid-regexp (signal (car err) (cdr err))) ;; rethrow
-        (error (signal (car err) (list "pcre2el error")))))
+        (error (signal (car err) (list (format "%s error" vr/engine))))))
 
     (setq ad-return-value
           (concat (vr--get-regexp-modifiers-prefix)
@@ -164,9 +199,8 @@ See also: http://docs.python.org/library/re.html#re.I"
 ;;; shell command / parsing functions
 
 (defun vr--get-command ()
-  (cond
-   ((eq vr/engine 'python) vr/command-python)
-   ((eq vr/engine 'custom) vr/command-custom)))
+  (let ((command (vr--engine-prop :command)))
+    (if (and command (symbolp command)) (symbol-value command) command)))
 
 (defun vr--command (command)
   (let ((stdout-buffer (generate-new-buffer (generate-new-buffer-name " *pyregex stdout*")))
@@ -277,7 +311,7 @@ and the message line."
   (let ((help ad-return-value))
     (when (and (vr--in-from) (vr--regexp-modifiers-enabled))
       (setq help (concat help ", C-c i: toggle case, C-c m: toggle multiline match of ^ and $, C-c s: toggle dot matches newline")))
-    (when (vr--in-replace)
+    (when (and (vr--in-replace) (vr--engine-prop :eval))
       (setq help (concat help ", C-c C-c: toggle expression")))
     (setq ad-return-value help)))
 
@@ -285,12 +319,9 @@ and the message line."
 
 (defadvice vr--feedback-function (around feedback-around (regexp-string forward feedback-limit callback) activate)
   "Feedback function for search using an external command."
-  (cond ((member vr/engine '(emacs pcre2el))
-         ad-do-it)
-        ((eq vr/engine 'emacs-plain)
-         (let ((vr/plain t)) ad-do-it))
-        (t
-         (setq ad-return-value
+  (if (vr--elisp-engine-p)
+      (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
+    (setq ad-return-value
                (vr--run-command
                 (format "%s matches --regexp %s %s %s"
                         (vr--get-command)
@@ -300,16 +331,13 @@ and the message line."
                 (lambda (output)
                   (vr--parse-matches
                    output
-                   callback)))))))
+                   callback))))))
 
 (defadvice vr--get-replacements (around get-replacements-around (feedback feedback-limit) activate)
   "Get replacements using an external command."
-  (cond ((member vr/engine '(emacs pcre2el))
-         ad-do-it)
-        ((eq vr/engine 'emacs-plain)
-         (let ((vr/plain t)) ad-do-it))
-        (t
-         (setq ad-return-value
+  (if (vr--elisp-engine-p)
+      (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
+    (setq ad-return-value
                (vr--run-command
                 (format "%s replace %s %s %s --regexp %s --replace %s"
                         (vr--get-command)
@@ -320,14 +348,17 @@ and the message line."
                         (if vr--use-expression "--eval" "")
                         (shell-quote-argument (vr--get-regexp-string))
                         (shell-quote-argument (vr--get-replace-string)))
-                'vr--parse-replace)))))
+                'vr--parse-replace))))
+
+(defun vr--engine-available-p (name)
+  "Hide external engines whose command is empty, e.g. an unset `vr/command-custom'."
+  (let ((vr/engine name))
+    (or (vr--elisp-engine-p)
+        (not (string= "" (or (vr--get-command) ""))))))
 
 (defun vr--select-engine ()
   (let ((default (symbol-name vr/engine))
-        (choices vr--engines))
-    ;; add custom engine if a custom command has been defined
-    (unless (string= "" vr/command-custom)
-      (setq choices (cons 'custom choices)))
+        (choices (seq-filter #'vr--engine-available-p (mapcar #'car vr/engines))))
     (intern (completing-read (format "Select engine (default: %s): " (symbol-name vr/engine)) (mapcar 'symbol-name choices) nil t nil nil default))))
 
 ;;;###autoload
@@ -354,7 +385,7 @@ and the message line."
 (defun vr/isearch-forward ()
   "Like isearch-forward, but using Python (or custom) regular expressions."
   (interactive)
-  (if (eq vr/engine 'emacs)
+  (if (vr--engine-prop :native-isearch)
       (isearch-forward-regexp)
     (let ((isearch-search-fun-function 'vr--isearch-search-fun-function))
       (isearch-forward-regexp))))
@@ -363,7 +394,7 @@ and the message line."
 (defun vr/isearch-backward ()
   "Like isearch-backward, but using Python (or custom) regular expressions."
   (interactive)
-  (if (eq vr/engine 'emacs)
+  (if (vr--engine-prop :native-isearch)
       (isearch-backward-regexp)
     (let ((isearch-search-fun-function 'vr--isearch-search-fun-function))
       (isearch-backward-regexp))))
@@ -405,7 +436,7 @@ and the message line."
   (let* ((is-called-from-lazy-highlighting bound) ;; we assume only lazy highlighting sets a bound. isearch does not, and neither does our own vr/query-replace.
          matches-vec ;; stores matches from regexp.py
          message-line ;; message from regexp.py
-         (regexp (if (eq vr/engine 'pcre2el) (pcre-to-elisp string) string))
+         (regexp (let ((translate (vr--engine-prop :translate))) (if translate (funcall translate string) string)))
          (start
           (if forward
               (if is-called-from-lazy-highlighting (window-start (selected-window)) (point))
