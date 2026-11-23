@@ -177,14 +177,17 @@ See also: http://docs.python.org/library/re.html#re.I"
   (let ((flags (vr--regexp-flags)))
     (if (string= "" flags) "" (format "--flags %s" flags))))
 
-(defadvice vr--get-replacement (around get-unmodified-replacement (replacement match-data i) activate)
-  (if (vr--elisp-engine-p)
-      (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
-    (setq ad-return-value replacement)))
+(defun vr--call-elisp-engine (orig &rest args)
+  (let ((vr/plain (or vr/plain (vr--engine-prop :plain))))
+    (apply orig args)))
 
-(defadvice vr--get-regexp-string (around get-regexp-string (&optional for-display) activate)
-  ad-do-it
-  (let ((regexp ad-return-value)
+(define-advice vr--get-replacement (:around (orig replacement match-data i) unmodified-replacement)
+  (if (vr--elisp-engine-p)
+      (vr--call-elisp-engine orig replacement match-data i)
+    replacement))
+
+(define-advice vr--get-regexp-string (:around (orig &optional for-display) translate)
+  (let ((regexp (funcall orig for-display))
         (translate (vr--engine-prop :translate)))
     (when (and (not for-display) translate)
       (condition-case err
@@ -192,8 +195,7 @@ See also: http://docs.python.org/library/re.html#re.I"
         (invalid-regexp (signal (car err) (cdr err))) ;; rethrow
         (error (signal (car err) (list (format "%s error" vr/engine))))))
 
-    (setq ad-return-value
-          (if for-display (concat (vr--get-regexp-modifiers-prefix) regexp) regexp))))
+    (if for-display (concat (vr--get-regexp-modifiers-prefix) regexp) regexp)))
 
 ;;; shell command / parsing functions
 
@@ -283,7 +285,7 @@ and the message line."
 
 :;; prompt
 
-(defadvice vr--set-minibuffer-prompt (around prompt activate)
+(define-advice vr--set-minibuffer-prompt (:override () prompt)
   (let ((prompt (cond ((equal vr--calling-func 'vr--calling-func-query-replace)
                        "Query replace")
                       ((equal vr--calling-func 'vr--calling-func-mc-mark)
@@ -303,53 +305,50 @@ and the message line."
     (setq prompt (concat prompt (if (vr--in-from) ": " " with: ")))
     (when (and (vr--in-from) (vr--regexp-modifiers-enabled))
       (setq prompt (concat prompt (vr--get-regexp-modifiers-prefix))))
-    (setq ad-return-value prompt)))
+    prompt))
 
-(defadvice vr--minibuffer-help-text (around help activate)
-  ad-do-it
-  (let ((help ad-return-value))
+(define-advice vr--minibuffer-help-text (:around (orig) help)
+  (let ((help (funcall orig)))
     (when (and (vr--in-from) (vr--regexp-modifiers-enabled))
       (setq help (concat help ", C-c i: toggle case, C-c m: toggle multiline match of ^ and $, C-c s: toggle dot matches newline")))
     (when (and (vr--in-replace) (vr--engine-prop :eval))
       (setq help (concat help ", C-c C-c: toggle expression")))
-    (setq ad-return-value help)))
+    help))
 
 ;; feedback / replace functions
 
-(defadvice vr--feedback-function (around feedback-around (regexp-string forward feedback-limit callback) activate)
+(define-advice vr--feedback-function (:around (orig regexp-string forward feedback-limit callback) external)
   "Feedback function for search using an external command."
   (if (vr--elisp-engine-p)
-      (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
-    (setq ad-return-value
-               (vr--run-command
-                (format "%s matches %s --regexp %s %s %s"
-                        (vr--get-command)
-                        (vr--flags-argument)
-                        (shell-quote-argument regexp-string)
-                        (when feedback-limit (format "--feedback-limit %s" feedback-limit))
-                        (if forward "" "--backwards"))
-                (lambda (output)
-                  (vr--parse-matches
-                   output
-                   callback))))))
+      (vr--call-elisp-engine orig regexp-string forward feedback-limit callback)
+    (vr--run-command
+     (format "%s matches %s --regexp %s %s %s"
+             (vr--get-command)
+             (vr--flags-argument)
+             (shell-quote-argument regexp-string)
+             (when feedback-limit (format "--feedback-limit %s" feedback-limit))
+             (if forward "" "--backwards"))
+     (lambda (output)
+       (vr--parse-matches
+        output
+        callback)))))
 
-(defadvice vr--get-replacements (around get-replacements-around (feedback feedback-limit) activate)
+(define-advice vr--get-replacements (:around (orig feedback feedback-limit) external)
   "Get replacements using an external command."
   (if (vr--elisp-engine-p)
-      (let ((vr/plain (or vr/plain (vr--engine-prop :plain)))) ad-do-it)
-    (setq ad-return-value
-               (vr--run-command
-                (format "%s replace %s %s %s %s --regexp %s --replace %s"
-                        (vr--get-command)
-                        (vr--flags-argument)
-                        (if feedback "--feedback" "")
-                        (if feedback-limit
-                            (format "--feedback-limit %s" feedback-limit)
-                          "")
-                        (if vr--use-expression "--eval" "")
-                        (shell-quote-argument (vr--get-regexp-string))
-                        (shell-quote-argument (vr--get-replace-string)))
-                'vr--parse-replace))))
+      (vr--call-elisp-engine orig feedback feedback-limit)
+    (vr--run-command
+     (format "%s replace %s %s %s %s --regexp %s --replace %s"
+             (vr--get-command)
+             (vr--flags-argument)
+             (if feedback "--feedback" "")
+             (if feedback-limit
+                 (format "--feedback-limit %s" feedback-limit)
+               "")
+             (if vr--use-expression "--eval" "")
+             (shell-quote-argument (vr--get-regexp-string))
+             (shell-quote-argument (vr--get-replace-string)))
+     'vr--parse-replace)))
 
 (defun vr--engine-available-p (name)
   "Hide external engines whose command is empty, e.g. an unset `vr/command-custom'."
@@ -459,16 +458,16 @@ and the message line."
           (setq message-line
                 ;; isearch has no modifier toggles; ignore any left over from vr/replace.
                 (let ((vr--regexp-modifiers nil))
-                 (vr--feedback-function
-                 regexp
-                 forward
-                 (if count
-                     count
-                   ;; if no bound, the rest of the buffer is searched for the first match -> need only one match
-                   (if bound nil 1))
-                 (lambda (i j begin end)
-                   (when (= j 0) (setq number-of-matches (1+ number-of-matches)))
-                   (setq matches-list (cons (list i j begin end) matches-list))))))
+                  (vr--feedback-function
+                   regexp
+                   forward
+                   (if count
+                       count
+                     ;; if no bound, the rest of the buffer is searched for the first match -> need only one match
+                     (if bound nil 1))
+                   (lambda (i j begin end)
+                     (when (= j 0) (setq number-of-matches (1+ number-of-matches)))
+                     (setq matches-list (cons (list i j begin end) matches-list))))))
 
           ;; convert list to vector
           (setq matches-vec (make-vector number-of-matches nil))
